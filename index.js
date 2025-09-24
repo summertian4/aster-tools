@@ -1454,6 +1454,10 @@ class HedgeTool {
                 console.log(`\n🧹 开始智能平仓...`);
                 await this.smartClosePositions(symbol);
                 console.log(`🎉 智能平仓完成，准备进入下一轮`);
+
+                const cooldownMinutes = Math.floor(Math.random() * 5) + 1;
+                console.log(`🕒 周期冷却 ${cooldownMinutes} 分钟...`);
+                await sleep(cooldownMinutes * 60 * 1000);
             } catch (err) {
                 console.log(`❌ 周期 #${cycle} 失败: ${err.message}`);
                 
