@@ -3,14 +3,42 @@ const nodeFetch = require('node-fetch');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const crypto = require('crypto');
 
+function normalizeProxyConfig(proxyConfig) {
+    if (!proxyConfig) return null;
+
+    if (typeof proxyConfig === 'string') {
+        return proxyConfig;
+    }
+
+    if (typeof proxyConfig === 'object') {
+        const { url, username, password } = proxyConfig;
+        if (!url) {
+            console.warn('代理配置缺少 url 字段，已忽略该配置');
+            return null;
+        }
+
+        try {
+            const proxyUrl = new URL(url);
+            if (username) proxyUrl.username = username;
+            if (password) proxyUrl.password = password;
+            return proxyUrl.toString();
+        } catch (error) {
+            console.warn(`代理地址无效: ${url}`);
+            return null;
+        }
+    }
+
+    console.warn('代理配置格式不支持，只接受字符串或对象');
+    return null;
+}
+
 class AsterFuturesAPI {
-    constructor(apiKey, apiSecret, accountName = 'default') {
+    constructor(apiKey, apiSecret, accountName = 'default', proxyUrl = null) {
         this.apiKey = apiKey;
         this.apiSecret = apiSecret;
         this.accountName = accountName;
         this.baseURL = 'https://fapi.asterdex.com';
-        // this.proxyUrl = 'http://127.0.0.1:1087';
-        this.proxyUrl = null;
+        this.proxyUrl = proxyUrl;
     }
 
     generateSignature(queryString) {
@@ -367,8 +395,12 @@ class AsterFuturesAPI {
 // 对冲交易工具类
 class HedgeTool {
     constructor() {
-        this.account1 = new AsterFuturesAPI(api.api1.apiKey, api.api1.apiSecret, '账号1');
-        this.account2 = new AsterFuturesAPI(api.api2.apiKey, api.api2.apiSecret, '账号2');
+        const globalProxy = normalizeProxyConfig(api.proxyUrl);
+        const proxy1 = normalizeProxyConfig(api.api1?.proxyUrl) ?? globalProxy;
+        const proxy2 = normalizeProxyConfig(api.api2?.proxyUrl) ?? globalProxy;
+
+        this.account1 = new AsterFuturesAPI(api.api1.apiKey, api.api1.apiSecret, '账号1', proxy1);
+        this.account2 = new AsterFuturesAPI(api.api2.apiKey, api.api2.apiSecret, '账号2', proxy2);
     }
 
     // 格式化时间

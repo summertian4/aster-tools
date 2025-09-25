@@ -155,13 +155,20 @@ example().catch(console.error);
 
 ```javascript
 const config = {
+   proxyUrl: null,       // 可选: 为所有账户设置统一代理，也可以使用 { url, username, password }
    api1: {
     apiKey: 'API密钥1',
     apiSecret: 'API密钥1',
+    proxyUrl: null,
    },
    api2: {
     apiKey: 'API密钥2', 
     apiSecret: 'API密钥2',
+    proxyUrl: {
+      url: 'http://127.0.0.1:1087',
+      username: 'proxy-user',
+      password: 'proxy-password',
+    }, // 可选: 覆盖账号2的代理
    },
    symbol: 'BTCUSDT',     // 默认交易币种
    leverage: 20,          // 默认杠杆倍数
@@ -171,10 +178,18 @@ const config = {
 
 ### 代理设置
 
-如需修改代理设置，请编辑 `index.js` 文件中的 `proxyUrl` 属性：
+如需修改代理设置，请调整 `apiConfig.js` 中的代理字段，支持以下两种写法：
 
 ```javascript
-this.proxyUrl = 'http://127.0.0.1:1087'; // 修改为你的代理地址
+// 方式一：直接写完整代理地址
+proxyUrl: 'http://127.0.0.1:1087'
+
+// 方式二：单独提供用户名密码
+proxyUrl: {
+  url: 'http://127.0.0.1:1087',
+  username: 'your-proxy-user',
+  password: 'your-proxy-password',
+}
 ```
 
 ## 安全提示
