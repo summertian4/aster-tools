@@ -417,18 +417,40 @@ class ThreeAccountHedgeTool {
         const mainQuantity = this.generateRandomQuantity();
         const remainingQuantity = mainQuantity;
         
-        // 随机分配给两个辅账号
-        const ratio1 = Math.random();
+        // 优化分配逻辑：确保两个辅账号都有合理的数量
+        // 避免极端分配（如99%和1%），使用更均匀的分配
+        const minRatio = 0.2; // 最小比例20%
+        const maxRatio = 0.8; // 最大比例80%
+        
+        const ratio1 = Math.random() * (maxRatio - minRatio) + minRatio;
         const ratio2 = 1 - ratio1;
         
         const quantity1 = remainingQuantity * ratio1;
         const quantity2 = remainingQuantity * ratio2;
         
+        // 确保最小数量要求
+        const minQuantity = 0.001; // BTC最小交易单位
+        const finalQuantity1 = Math.max(quantity1, minQuantity);
+        const finalQuantity2 = Math.max(quantity2, minQuantity);
+        
+        // 如果调整后总和超过主数量，按比例缩减
+        const totalAdjusted = finalQuantity1 + finalQuantity2;
+        if (totalAdjusted > mainQuantity) {
+            const scaleFactor = mainQuantity / totalAdjusted;
+            return {
+                mainQuantity: parseFloat(mainQuantity.toFixed(3)),
+                quantities: [
+                    parseFloat((finalQuantity1 * scaleFactor).toFixed(3)),
+                    parseFloat((finalQuantity2 * scaleFactor).toFixed(3))
+                ]
+            };
+        }
+        
         return {
             mainQuantity: parseFloat(mainQuantity.toFixed(3)),
             quantities: [
-                parseFloat(quantity1.toFixed(3)),
-                parseFloat(quantity2.toFixed(3))
+                parseFloat(finalQuantity1.toFixed(3)),
+                parseFloat(finalQuantity2.toFixed(3))
             ]
         };
     }
@@ -465,13 +487,13 @@ class ThreeAccountHedgeTool {
         const {
             symbol = api.symbol,
             leverage = api.leverage,
-            positionTime = api.positionTime || 5,
+            positionTime = api.positionTime || { min: 30, max: 60 },
             positionSide = 'BOTH',
             maxWaitTime = 300000
         } = config;
 
         logger.log(`\n🔁 === [${this.formatTime()}] 启动三账号循环对冲 ===`);
-        logger.log(`币种: ${symbol}, 杠杆: ${leverage}x, 持仓: ${positionTime} 分钟`);
+        logger.log(`币种: ${symbol}, 杠杆: ${leverage}x, 持仓: 随机${positionTime.min}-${positionTime.max}秒`);
         logger.log(`🎲 随机选择主账号和辅账号，随机分配金额`);
         let cycle = 0;
 
@@ -533,25 +555,41 @@ class ThreeAccountHedgeTool {
                 // 6) 按比例调整辅账号下单数量
                 const ratio = executedQty / quantityDist.mainQuantity;
                 const adjustedQuantities = quantityDist.quantities.map(qty => qty * ratio);
+                
+                // 验证和修正数量，确保所有数量都大于0且符合BTC市场要求
+                const validatedQuantities = adjustedQuantities.map(qty => {
+                    const formattedQty = parseFloat(qty.toFixed(3));
+                    if (formattedQty <= 0) {
+                        logger.log(`⚠️ 检测到无效数量 ${qty}，调整为最小数量 0.001`);
+                        return 0.001; // BTC最小交易单位
+                    }
+                    return formattedQty;
+                });
+                
+                logger.log(`📊 数量调整详情:`);
+                logger.log(`   原始比例: ${ratio.toFixed(6)}`);
+                logger.log(`   调整后数量: [${adjustedQuantities.map(q => q.toFixed(6)).join(', ')}]`);
+                logger.log(`   验证后数量: [${validatedQuantities.join(', ')}]`);
 
                 // 7) 辅账号立即市价对冲
                 logger.log(`⚡ 辅账号立即市价对冲...`);
                 const hedgeResults = await Promise.allSettled([
-                    helperAccounts[0].sellOrder(symbol, adjustedQuantities[0], null, 'MARKET', positionSide),
-                    helperAccounts[1].sellOrder(symbol, adjustedQuantities[1], null, 'MARKET', positionSide)
+                    helperAccounts[0].sellOrder(symbol, validatedQuantities[0], null, 'MARKET', positionSide),
+                    helperAccounts[1].sellOrder(symbol, validatedQuantities[1], null, 'MARKET', positionSide)
                 ]);
 
                 hedgeResults.forEach((result, index) => {
                     if (result.status === 'fulfilled') {
-                        logger.log(`✅ ${helperAccountNames[index]} 市价对冲完成: orderId=${result.value.orderId}, 数量=${adjustedQuantities[index]}`);
+                        logger.log(`✅ ${helperAccountNames[index]} 市价对冲完成: orderId=${result.value.orderId}, 数量=${validatedQuantities[index]}`);
                     } else {
                         logger.error(`❌ ${helperAccountNames[index]} 市价对冲失败: ${result.reason?.message}`);
                     }
                 });
 
-                // 8) 持仓
-                const holdMs = Math.max(1, positionTime) * 60 * 1000;
-                logger.log(`⏱️ 持仓 ${positionTime} 分钟...`);
+                // 8) 随机持仓时间 (30-60秒)
+                const randomHoldSeconds = Math.floor(Math.random() * (positionTime.max - positionTime.min + 1)) + positionTime.min;
+                const holdMs = randomHoldSeconds * 1000;
+                logger.log(`⏱️ 随机持仓 ${randomHoldSeconds} 秒...`);
                 await sleep(holdMs);
 
                 // 9) 同时平仓

@@ -27,7 +27,7 @@ const config = {
    leverage: 20,
    quantity: 0.005,
    price: 112000,
-   positionTime: 10, // 持仓时间(单位分钟)
+   positionTime: { min: 30, max: 60 }, // 持仓时间(单位秒) - 随机30-60秒
    // 随机金额范围配置
    minQuantity: 0.001,  // 最小下单数量
    maxQuantity: 0.01,   // 最大下单数量
