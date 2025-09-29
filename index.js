@@ -342,6 +342,26 @@ class AsterFuturesAPI {
         return response;
     }
 
+    async getOpenOrders(symbol = null) {
+        const params = symbol ? { symbol } : {};
+        const response = await this.makeRequest('GET', '/fapi/v1/openOrders', params, true);
+        return response;
+    }
+
+    async cancelOrder(symbol, orderId) {
+        const response = await this.makeRequest('DELETE', '/fapi/v1/order', {
+            symbol,
+            orderId
+        }, true);
+        return response;
+    }
+
+    async cancelAllOrders(symbol = null) {
+        const params = symbol ? { symbol } : {};
+        const response = await this.makeRequest('DELETE', '/fapi/v1/allOpenOrders', params, true);
+        return response;
+    }
+
     async monitorOrderStatus(symbol, orderId, maxWaitTime = 300000) {
         const startTime = Date.now();
         logger.log(`[${this.accountName}] 开始监控订单 ${orderId} 状态...`);
@@ -657,6 +677,65 @@ class ThreeAccountHedgeTool {
         }
     }
 
+    // 取消所有账号的未成交订单
+    async cancelAllOpenOrders(symbol = api.symbol) {
+        logger.log(`\n🚫 === [${this.formatTime()}] 取消所有未成交订单 ===`);
+        logger.log(`币种: ${symbol}`);
+
+        try {
+            // 先查询所有账号的未成交订单
+            const openOrdersResults = await Promise.allSettled([
+                this.account1.getOpenOrders(symbol),
+                this.account2.getOpenOrders(symbol),
+                this.account3.getOpenOrders(symbol)
+            ]);
+
+            let totalOrders = 0;
+            openOrdersResults.forEach((result, index) => {
+                if (result.status === 'fulfilled' && result.value) {
+                    const orders = result.value;
+                    if (orders.length > 0) {
+                        totalOrders += orders.length;
+                        logger.log(`账号${index + 1} 发现 ${orders.length} 个未成交订单`);
+                        orders.forEach(order => {
+                            logger.log(`   订单ID: ${order.orderId}, 类型: ${order.side} ${order.type}, 数量: ${order.origQty}, 价格: ${order.price || '市价'}`);
+                        });
+                    } else {
+                        logger.log(`账号${index + 1}: 无未成交订单`);
+                    }
+                } else {
+                    logger.error(`账号${index + 1} 查询未成交订单失败: ${result.reason?.message}`);
+                }
+            });
+
+            if (totalOrders === 0) {
+                logger.log(`✅ 所有账号均无 ${symbol} 未成交订单，无需取消`);
+                return [];
+            }
+
+            // 执行取消订单
+            logger.log(`\n🔄 开始取消 ${totalOrders} 个未成交订单...`);
+            const cancelResults = await Promise.allSettled([
+                this.account1.cancelAllOrders(symbol),
+                this.account2.cancelAllOrders(symbol),
+                this.account3.cancelAllOrders(symbol)
+            ]);
+
+            cancelResults.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    logger.log(`✅ 账号${index + 1} 取消订单成功`);
+                } else {
+                    logger.error(`❌ 账号${index + 1} 取消订单失败: ${result.reason?.message}`);
+                }
+            });
+
+            return cancelResults;
+        } catch (error) {
+            logger.error(`取消订单操作失败: ${error.message}`);
+            throw error;
+        }
+    }
+
     // 同时平仓所有账号
     async closeAllPositions(symbol = api.symbol) {
         logger.log(`\n🔄 === [${this.formatTime()}] 三账号同时平仓 ===`);
@@ -772,11 +851,15 @@ async function runAutomatedFlow() {
     process.on('SIGINT', async () => {
         logger.log('\n\n🛑 接收到退出信号，正在安全退出...');
         try {
+            logger.log('🚫 正在取消所有未成交订单...');
+            await tool.cancelAllOpenOrders();
+            
             logger.log('📋 正在平仓所有持仓...');
             await tool.closeAllPositions();
+            
             logger.log('✅ 安全退出完成');
         } catch (error) {
-            logger.error(`退出时平仓失败: ${error.message}`);
+            logger.error(`退出时操作失败: ${error.message}`);
         }
         process.exit(0);
     });
@@ -784,16 +867,20 @@ async function runAutomatedFlow() {
     try {
         logger.log('🚀 === Aster 三账号对冲交易工具启动 ===');
         
-        // 步骤1: 检查并平仓所有账户的仓位
-        logger.log('\n📋 === 步骤1: 检查并平仓现有仓位 ===');
+        // 步骤1: 取消所有未成交订单
+        logger.log('\n🚫 === 步骤1: 取消所有未成交订单 ===');
+        await tool.cancelAllOpenOrders();
+        
+        // 步骤2: 检查并平仓所有账户的仓位
+        logger.log('\n📋 === 步骤2: 检查并平仓现有仓位 ===');
         await tool.closeAllPositions();
         
-        // 步骤2: 打印当前配置和风险分析
-        logger.log('\n📊 === 步骤2: 配置和风险分析 ===');
+        // 步骤3: 打印当前配置和风险分析
+        logger.log('\n📊 === 步骤3: 配置和风险分析 ===');
         tool.showConfigAnalysis();
         
-        // 步骤3: 开启循环对冲
-        logger.log('\n🔄 === 步骤3: 启动循环对冲 ===');
+        // 步骤4: 开启循环对冲
+        logger.log('\n🔄 === 步骤4: 启动循环对冲 ===');
         logger.log('按 Ctrl+C 可随时停止循环并安全退出');
         await tool.loopHedge();
         
