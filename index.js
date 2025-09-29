@@ -321,9 +321,18 @@ class AsterFuturesAPI {
                     };
                 }
 
-                const result = await this.placeOrder(orderParams);
-                logger.log(`[${this.accountName}] 平仓成功: ${closeQuantity} ${symbol}`);
-                return result;
+                try {
+                    const result = await this.placeOrder(orderParams);
+                    logger.log(`[${this.accountName}] 平仓成功: ${closeQuantity} ${symbol}`);
+                    return result;
+                } catch (err) {
+                    const msg = String(err.message || '').toLowerCase();
+                    if (msg.includes('reduceonly') && msg.includes('rejected')) {
+                        logger.log(`[${this.accountName}] 平仓请求被拒绝（reduceOnly），可能已无持仓，忽略。`);
+                        return null;
+                    }
+                    throw err;
+                }
             }
 
             logger.log(`[${this.accountName}] 没有需要平仓的持仓`);
@@ -405,6 +414,9 @@ class ThreeAccountHedgeTool {
         this.account2 = new AsterFuturesAPI(api.api2.apiKey, api.api2.apiSecret, '账号2', api.api2.proxy);
         this.account3 = new AsterFuturesAPI(api.api3.apiKey, api.api3.apiSecret, '账号3', api.api3.proxy);
         this.accounts = [this.account1, this.account2, this.account3];
+        // 避免重复平仓/退出的状态标记
+        this.isClosing = false;
+        this.exitRequested = false;
     }
 
     formatTime() {
@@ -612,31 +624,38 @@ class ThreeAccountHedgeTool {
                 logger.log(`⏱️ 随机持仓 ${randomHoldSeconds} 秒...`);
                 await sleep(holdMs);
 
-                // 9) 同时平仓
-                logger.log(`\n🧹 同时平仓中...`);
-                const closeResults = await Promise.allSettled([
-                    this.account1.closePosition(symbol),
-                    this.account2.closePosition(symbol),
-                    this.account3.closePosition(symbol)
-                ]);
+                // 9) 同时平仓（加防抖，避免并发重复平仓）
+                if (this.isClosing) {
+                    logger.log(`\n⏳ 正在平仓中，跳过重复平仓请求...`);
+                } else {
+                    this.isClosing = true;
+                    logger.log(`\n🧹 同时平仓中...`);
+                    const closeResults = await Promise.allSettled([
+                        this.account1.closePosition(symbol),
+                        this.account2.closePosition(symbol),
+                        this.account3.closePosition(symbol)
+                    ]);
 
-                closeResults.forEach((result, index) => {
-                    if (result.status === 'fulfilled') {
-                        if (result.value) {
-                            logger.log(`✅ 账号${index + 1} 平仓成功`);
+                    closeResults.forEach((result, index) => {
+                        if (result.status === 'fulfilled') {
+                            if (result.value) {
+                                logger.log(`✅ 账号${index + 1} 平仓成功`);
+                            } else {
+                                logger.log(`ℹ️ 账号${index + 1} 无需平仓`);
+                            }
                         } else {
-                            logger.log(`ℹ️ 账号${index + 1} 无需平仓`);
+                            logger.error(`❌ 账号${index + 1} 平仓失败: ${result.reason?.message}`);
                         }
-                    } else {
-                        logger.error(`❌ 账号${index + 1} 平仓失败: ${result.reason?.message}`);
-                    }
-                });
+                    });
+                    this.isClosing = false;
+                }
 
                 logger.log(`🎉 平仓完成，准备进入下一轮`);
             } catch (err) {
                 logger.error(`❌ 周期 #${cycle} 失败: ${err.message}`);
                 logger.log(`🕒 休眠 5 秒后继续下一轮...`);
                 await sleep(5000);
+                this.isClosing = false; // 避免异常时锁未释放
             }
         }
     }
@@ -848,14 +867,25 @@ async function runAutomatedFlow() {
     const tool = new ThreeAccountHedgeTool();
     
     // 设置优雅退出处理
+    let exiting = false;
     process.on('SIGINT', async () => {
+        if (exiting) return; // 忽略重复信号
+        exiting = true;
+        tool.exitRequested = true;
         logger.log('\n\n🛑 接收到退出信号，正在安全退出...');
         try {
             logger.log('🚫 正在取消所有未成交订单...');
             await tool.cancelAllOpenOrders();
             
-            logger.log('📋 正在平仓所有持仓...');
-            await tool.closeAllPositions();
+            // 防止与循环内平仓并发冲突
+            if (!tool.isClosing) {
+                tool.isClosing = true;
+                logger.log('📋 正在平仓所有持仓...');
+                await tool.closeAllPositions();
+                tool.isClosing = false;
+            } else {
+                logger.log('⏳ 已在平仓中，跳过重复平仓');
+            }
             
             logger.log('✅ 安全退出完成');
         } catch (error) {
