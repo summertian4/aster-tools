@@ -5,6 +5,15 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop aster-hedge-tool",
+    "pm2:restart": "pm2 restart aster-hedge-tool",
+    "pm2:reload": "pm2 reload aster-hedge-tool",
+    "pm2:delete": "pm2 delete aster-hedge-tool",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs aster-hedge-tool",
+    "pm2:monit": "pm2 monit",
+    "pm2:flush": "pm2 flush",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -21,6 +30,9 @@
   "dependencies": {
     "node-fetch": "^2.7.0",
     "https-proxy-agent": "^7.0.2"
+  },
+  "devDependencies": {
+    "pm2": "^5.3.0"
   },
   "engines": {
     "node": ">=14.0.0"
