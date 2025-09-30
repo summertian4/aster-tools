@@ -96,6 +96,25 @@ async function example() {
 example().catch(console.error);
 ```
 
+### 余额查询（v4）
+
+使用 v4 账户接口查询合约账户余额，只输出每个账号的总余额与指定资产余额：
+
+```bash
+# 使用 npm
+npm start -- --balance
+
+# 或直接用 node
+node index.js --balance
+```
+
+输出内容（按账号分别显示）：
+- totalWalletBalance（账户总余额）
+- USDF 资产的 walletBalance
+- USDT 资产的 walletBalance
+
+说明：已移除 v1/v2 的余额查询实现，余额通过 `GET /fapi/v4/account` 获取。
+
 ## API 说明
 
 ### HedgeTool 类

@@ -124,7 +124,8 @@ class AsterFuturesAPI {
             };
 
             if (needAuth) {
-                params.timestamp = Date.now();
+                // 统一加入 timestamp/recvWindow（v4 不需要 nonce/user）
+                if (params.timestamp == null) params.timestamp = Date.now();
                 params.recvWindow = params.recvWindow || 5000;
                 headers['X-MBX-APIKEY'] = this.apiKey;
             }
@@ -354,6 +355,12 @@ class AsterFuturesAPI {
     async getOpenOrders(symbol = null) {
         const params = symbol ? { symbol } : {};
         const response = await this.makeRequest('GET', '/fapi/v1/openOrders', params, true);
+        return response;
+    }
+
+    // 账户信息 v4（包含总余额与资产明细）
+    async getAccountInfoV4() {
+        const response = await this.makeRequest('GET', '/fapi/v4/account', {}, true);
         return response;
     }
 
@@ -755,6 +762,79 @@ class ThreeAccountHedgeTool {
         }
     }
 
+    // 查询三账号的合约账户余额
+    async showAllBalances() {
+        logger.log(`\n💼 === [${this.formatTime()}] 三账号合约账户余额（v4）===`);
+        try {
+            const results = await Promise.allSettled([
+                this.account1.getAccountInfoV4(),
+                this.account2.getAccountInfoV4(),
+                this.account3.getAccountInfoV4()
+            ]);
+
+            let sumTotal = 0;
+            let sumUSDF = 0;
+            let sumUSDT = 0;
+
+            const rows = [];
+            const formatNum = (n, d = 8) => (Number.isFinite(n) ? n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '0.00000000');
+
+            results.forEach((result, index) => {
+                const accName = `账号${index + 1}`;
+                if (result.status !== 'fulfilled') {
+                    logger.error(`${accName} 查询失败: ${result.reason?.message}`);
+                    return;
+                }
+
+                const info = result.value || {};
+                const totalNum = parseFloat(info.totalWalletBalance || '0') || 0;
+                const assets = Array.isArray(info.assets) ? info.assets : [];
+                const assetMap = new Map(assets.map(a => [a.asset, a]));
+                const pickNum = (symbol) => {
+                    const a = assetMap.get(symbol);
+                    return a ? (parseFloat(a.walletBalance || '0') || 0) : 0;
+                };
+
+                const usdfNum = pickNum('USDF');
+                const usdtNum = pickNum('USDT');
+
+                sumTotal += totalNum;
+                sumUSDF += usdfNum;
+                sumUSDT += usdtNum;
+
+                rows.push([accName, totalNum, usdfNum, usdtNum]);
+            });
+
+            // 构建表格输出
+            const headers = ['账号', 'totalWalletBalance', 'USDF', 'USDT'];
+            const stringRows = rows.map(([name, total, usdf, usdt]) => [
+                name,
+                formatNum(total),
+                formatNum(usdf),
+                formatNum(usdt)
+            ]);
+
+            const allRows = [headers, ...stringRows, ['合计', formatNum(sumTotal), formatNum(sumUSDF), formatNum(sumUSDT)]];
+            const colWidths = [0, 1, 2, 3].map(i => Math.max(...allRows.map(r => r[i].length)));
+
+            const padCell = (s, i) => (i === 0 ? s.padEnd(colWidths[i], ' ') : s.padStart(colWidths[i], ' '));
+            const sep = colWidths.map(w => '-'.repeat(w)).join(' | ');
+
+            // 标题
+            logger.log('');
+            logger.log(headers.map((h, i) => padCell(h, i)).join(' | '));
+            logger.log(sep);
+            // 行
+            stringRows.forEach(r => logger.log(r.map((c, i) => padCell(c, i)).join(' | ')));
+            // 合计
+            logger.log(sep);
+            logger.log(['合计', formatNum(sumTotal), formatNum(sumUSDF), formatNum(sumUSDT)].map((c, i) => padCell(c, i)).join(' | '));
+        } catch (error) {
+            logger.error(`查询余额失败: ${error.message}`);
+            throw error;
+        }
+    }
+
     // 同时平仓所有账号
     async closeAllPositions(symbol = api.symbol) {
         logger.log(`\n🔄 === [${this.formatTime()}] 三账号同时平仓 ===`);
@@ -865,6 +945,8 @@ if (require.main === module) {
 // 自动化执行流程
 async function runAutomatedFlow() {
     const tool = new ThreeAccountHedgeTool();
+    const args = process.argv.slice(2);
+    const isBalanceMode = args.includes('--balance') || args.includes('-b');
     
     // 设置优雅退出处理
     let exiting = false;
@@ -896,6 +978,14 @@ async function runAutomatedFlow() {
     
     try {
         logger.log('🚀 === Aster 三账号对冲交易工具启动 ===');
+        
+        // 余额查询模式：只查询余额后退出
+        if (isBalanceMode) {
+            logger.log('\n💼 === 余额查询模式 ===');
+            await tool.showAllBalances();
+            logger.log('✅ 余额查询完成');
+            return;
+        }
         
         // 步骤1: 取消所有未成交订单
         logger.log('\n🚫 === 步骤1: 取消所有未成交订单 ===');

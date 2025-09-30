@@ -1,23 +1,23 @@
 const config = {
    api1: {
-    apiKey: '',
-    apiSecret: '',
+   apiKey: '',
+   apiSecret: '',
     proxy: {
       enabled: false,
       url: 'http://127.0.0.1:1087'
     }
    },
    api2: {
-    apiKey: '',
-    apiSecret: '',
+   apiKey: '',
+   apiSecret: '',
     proxy: {
       enabled: false,
       url: 'http://127.0.0.1:1088'
     }
    },
    api3: {
-    apiKey: '',
-    apiSecret: '',
+   apiKey: '',
+   apiSecret: '',
     proxy: {
       enabled: false,
       url: 'http://127.0.0.1:1089'
