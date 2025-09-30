@@ -53,6 +53,27 @@ class Logger {
 // 创建全局日志实例
 const logger = new Logger();
 
+// 发送 Telegram 报警通知
+async function sendTelegramAlert(text) {
+    try {
+        if (!api.telegram || !api.telegram.enabled) return;
+        const botToken = api.telegram.botToken;
+        const chatId = api.telegram.chatId;
+        if (!botToken || !chatId) return;
+
+        const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+        const body = new URLSearchParams({ chat_id: String(chatId), text: text });
+        await nodeFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        });
+    } catch (e) {
+        // 仅记录，不中断主流程
+        logger.error(`Telegram 通知失败: ${e.message}`);
+    }
+}
+
 class AsterFuturesAPI {
     constructor(apiKey, apiSecret, accountName = 'default', proxyConfig = null) {
         this.apiKey = apiKey;
@@ -178,6 +199,10 @@ class AsterFuturesAPI {
             return result;
         } catch (error) {
             logger.error(`[${this.accountName}] 请求失败: ${error.message}`);
+            // 网络请求错误，发送 Telegram 报警
+            const briefParams = Object.keys(params || {}).length ? `?${new URLSearchParams(Object.assign({}, params, { signature: undefined })).toString()}` : '';
+            const msg = `⚠️ 报警：账号 ${this.accountName} API 请求失败\n${method} ${endpoint}${briefParams}\n错误: ${error.message}`;
+            await sendTelegramAlert(msg);
             throw error;
         }
     }
@@ -947,6 +972,7 @@ async function runAutomatedFlow() {
     const tool = new ThreeAccountHedgeTool();
     const args = process.argv.slice(2);
     const isBalanceMode = args.includes('--balance') || args.includes('-b');
+    const isTestTg = args.includes('--testtg');
     
     // 设置优雅退出处理
     let exiting = false;
@@ -979,6 +1005,14 @@ async function runAutomatedFlow() {
     try {
         logger.log('🚀 === Aster 三账号对冲交易工具启动 ===');
         
+        // Telegram 测试消息模式
+        if (isTestTg) {
+            logger.log('\n📨 === Telegram 消息测试 ===');
+            await sendTelegramAlert(`🔔 测试通知：来自 Aster 工具 ${new Date().toLocaleString('zh-CN')}`);
+            logger.log('✅ 已调用 Telegram 接口（请检查聊天是否收到）');
+            return;
+        }
+
         // 余额查询模式：只查询余额后退出
         if (isBalanceMode) {
             logger.log('\n💼 === 余额查询模式 ===');

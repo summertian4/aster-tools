@@ -23,6 +23,12 @@ const config = {
       url: 'http://127.0.0.1:1089'
     }
    },
+   // Telegram 报警配置
+   telegram: {
+     enabled: false,
+     botToken: '',
+     chatId: ''
+   },
    symbol: 'BTCUSDT',
    leverage: 20,
    quantity: 0.005,
