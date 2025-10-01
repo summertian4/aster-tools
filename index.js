@@ -134,7 +134,21 @@ class AsterFuturesAPI {
     }
 
     async makeRequest(method, endpoint, params = {}, needAuth = false) {
-        try {
+        const maxRetries = Number.isFinite(api.requestRetries) ? Math.max(0, api.requestRetries) : 3;
+        const baseDelayMs = Number.isFinite(api.requestRetryDelayMs) ? Math.max(50, api.requestRetryDelayMs) : 800;
+        let attempt = 0;
+        let lastError = null;
+        const shouldRetry = (err, status) => {
+            const msg = String(err?.message || '').toLowerCase();
+            // 网络类错误
+            const net = ['etimedout', 'econnreset', 'eai_again', 'fetch failed', 'network', 'socket hang up'].some(k => msg.includes(k));
+            // HTTP 类可重试
+            const httpRetry = status && (status === 429 || (status >= 500 && status < 600));
+            return net || httpRetry;
+        };
+
+        while (attempt <= maxRetries) {
+            try {
             let url = `${this.baseURL}${endpoint}`;
             let queryString = '';
             let body = null;
@@ -192,19 +206,33 @@ class AsterFuturesAPI {
                 } catch (e) {
                     // 忽略读取响应体的错误
                 }
-                throw new Error(errorMessage);
+                const httpErr = new Error(errorMessage);
+                httpErr.status = response.status;
+                throw httpErr;
             }
 
             const result = await response.json();
             return result;
-        } catch (error) {
-            logger.error(`[${this.accountName}] 请求失败: ${error.message}`);
-            // 网络请求错误，发送 Telegram 报警
-            const briefParams = Object.keys(params || {}).length ? `?${new URLSearchParams(Object.assign({}, params, { signature: undefined })).toString()}` : '';
-            const msg = `⚠️ 报警：账号 ${this.accountName} API 请求失败\n${method} ${endpoint}${briefParams}\n错误: ${error.message}`;
-            await sendTelegramAlert(msg);
-            throw error;
+            } catch (error) {
+                lastError = error;
+                const status = error?.status;
+                attempt += 1;
+                if (attempt > maxRetries || !shouldRetry(error, status)) {
+                    logger.error(`[${this.accountName}] 请求失败: ${error.message}`);
+                    const briefParams = Object.keys(params || {}).length ? `?${new URLSearchParams(Object.assign({}, params, { signature: undefined })).toString()}` : '';
+                    const msg = `⚠️ 报警：账号 ${this.accountName} API 请求失败\n${method} ${endpoint}${briefParams}\n错误: ${error.message}`;
+                    await sendTelegramAlert(msg);
+                    throw error;
+                }
+                // 退避重试
+                const jitter = Math.floor(Math.random() * 200);
+                const delay = Math.min(10_000, baseDelayMs * Math.pow(2, attempt - 1)) + jitter;
+                logger.log(`[${this.accountName}] 请求重试(${attempt}/${maxRetries}) ${method} ${endpoint}: ${error.message}，${delay}ms 后重试`);
+                await new Promise(r => setTimeout(r, delay));
+            }
         }
+        // 理论上不会到达
+        throw lastError || new Error('未知请求错误');
     }
 
     async getPrice(symbol) {
@@ -758,6 +786,7 @@ class ThreeAccountHedgeTool {
             ]);
 
             let totalOrders = 0;
+            let queryFailures = 0;
             openOrdersResults.forEach((result, index) => {
                 if (result.status === 'fulfilled' && result.value) {
                     const orders = result.value.filter(order => !order.symbol || order.symbol === targetSymbol);
@@ -772,15 +801,19 @@ class ThreeAccountHedgeTool {
                     }
                 } else {
                     logger.error(`账号${index + 1} 查询未成交订单失败: ${result.reason?.message}`);
+                    queryFailures += 1;
                 }
             });
 
-            if (totalOrders === 0) {
+            if (totalOrders === 0 && queryFailures === 0) {
                 logger.log(`✅ 所有账号均无 ${targetSymbol} 未成交订单，无需取消`);
                 return [];
             }
 
             // 执行取消订单
+            if (queryFailures > 0) {
+                logger.log(`\n⚠️ 因 ${queryFailures} 个账号查询失败，仍将尝试对所有账号执行 ${targetSymbol} 挂单取消（盲取消）...`);
+            }
             logger.log(`\n🔄 开始取消 ${totalOrders} 个${targetSymbol}未成交订单...`);
             const cancelResults = await Promise.allSettled([
                 this.account1.cancelAllOrders(targetSymbol),
@@ -1035,6 +1068,9 @@ class ThreeAccountHedgeTool {
                     logger.error(`❌ 账号${index + 1} 平仓失败: ${result.reason?.message}`);
                 }
             });
+
+            // 平仓后打印当前各资产持仓概览
+            await this.logAllAccountPositions();
 
             return results;
         } catch (error) {
