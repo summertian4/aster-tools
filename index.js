@@ -612,6 +612,7 @@ class ThreeAccountHedgeTool {
                     logger.log(`⏭️ ${mainAccountName}订单未完全成交，启动清理后进入下一轮`);
                     try {
                         await this.ensureNoPositionsAndOrders(symbol);
+                        await this.logAllAccountPositions();
                     } catch (cleanupError) {
                         logger.error(`⚠️ 清理挂单/仓位失败: ${cleanupError.message}`);
                     }
@@ -655,6 +656,8 @@ class ThreeAccountHedgeTool {
                     }
                 });
 
+                await this.logAllAccountPositions();
+
                 // 8) 随机持仓时间 (30-60秒)
                 const randomHoldSeconds = Math.floor(Math.random() * (positionTime.max - positionTime.min + 1)) + positionTime.min;
                 const holdMs = randomHoldSeconds * 1000;
@@ -687,6 +690,7 @@ class ThreeAccountHedgeTool {
                         });
 
                         await this.ensureNoPositionsAndOrders(symbol);
+                        await this.logAllAccountPositions();
                         logger.log(`🎉 平仓完成，准备进入下一轮`);
                     } finally {
                         this.isClosing = false;
@@ -872,6 +876,41 @@ class ThreeAccountHedgeTool {
 
         const stillHolding = leftovers.map(item => `账号${item.index + 1}`).join(', ');
         throw new Error(`仍检测到持仓未能清理: ${stillHolding}`);
+    }
+
+    async logAllAccountPositions() {
+        logger.log(`\n📋 === [${this.formatTime()}] 当前各资产持仓 ===`);
+
+        const positionResults = await Promise.allSettled([
+            this.account1.getPositions(),
+            this.account2.getPositions(),
+            this.account3.getPositions()
+        ]);
+
+        positionResults.forEach((result, index) => {
+            const accountLabel = `账号${index + 1}`;
+            if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+                const positions = result.value.filter(pos => {
+                    const amt = parseFloat(pos.positionAmt);
+                    return !Number.isNaN(amt) && Math.abs(amt) > 0;
+                });
+
+                if (positions.length === 0) {
+                    logger.log(`${accountLabel}: 无持仓`);
+                } else {
+                    logger.log(`${accountLabel} 持仓概览:`);
+                    positions.forEach(pos => {
+                        const amt = parseFloat(pos.positionAmt);
+                        const side = pos.positionSide || (amt > 0 ? 'LONG' : 'SHORT');
+                        const symbol = pos.symbol || '未知合约';
+                        logger.log(`   ${symbol}: ${pos.positionAmt} (side: ${side}, 均价: ${pos.entryPrice}, 未实现盈亏: ${pos.unRealizedProfit})`);
+                    });
+                }
+            } else {
+                const reason = result.reason?.message || '未知错误';
+                logger.error(`${accountLabel} 查询持仓失败: ${reason}`);
+            }
+        });
     }
 
     // 查询三账号的合约账户余额
