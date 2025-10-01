@@ -455,24 +455,26 @@ class ThreeAccountHedgeTool {
         return new Date().toLocaleString('zh-CN');
     }
 
-    // 生成随机数量（带安全检查）
+    // 生成随机数量（基于参考价的安全检查）
     generateRandomQuantity() {
         const min = api.minQuantity || 0.001;
         const max = api.maxQuantity || 0.01;
         const quantity = Math.random() * (max - min) + min;
-        
-        // 安全检查：确保不超过最大持仓价值
-        const currentPrice = 112000; // 可以从API获取实时价格
-        const positionValue = quantity * currentPrice;
-        const maxValue = api.maxPositionValue || 2000;
-        
-        if (positionValue > maxValue) {
-            const safeQuantity = maxValue / currentPrice;
-            logger.log(`⚠️ 下单金额 ${positionValue.toFixed(2)} USDT 超过限制 ${maxValue} USDT，调整为 ${safeQuantity.toFixed(3)} BTC`);
-            return parseFloat(safeQuantity.toFixed(3));
+
+        // 安全检查：确保不超过最大持仓价值（使用配置参考价）
+        const price = api.price || 0;
+        if (price > 0) {
+            const positionValue = quantity * price;
+            const maxValue = api.maxPositionValue || 2000;
+
+            if (positionValue > maxValue) {
+                const safeQuantity = maxValue / price;
+                logger.log(`⚠️ 下单金额 ${positionValue.toFixed(2)} USDT 超过限制 ${maxValue} USDT，调整为 ${safeQuantity.toFixed(3)}`);
+                return parseFloat(safeQuantity.toFixed(3));
+            }
         }
-        
-        // BTC市场限制为3位小数
+
+        // 市场常见精度为3位小数
         return parseFloat(quantity.toFixed(3));
     }
 
@@ -493,7 +495,7 @@ class ThreeAccountHedgeTool {
         const quantity2 = remainingQuantity * ratio2;
         
         // 确保最小数量要求
-        const minQuantity = 0.001; // BTC最小交易单位
+        const minQuantity = 0.001; // 最小交易单位
         const finalQuantity1 = Math.max(quantity1, minQuantity);
         const finalQuantity2 = Math.max(quantity2, minQuantity);
         
@@ -590,17 +592,17 @@ class ThreeAccountHedgeTool {
                 logger.log(`   主账号: ${mainAccountName} (做多)`);
                 logger.log(`   辅账号: ${helperAccountNames.join(', ')} (做空)`);
 
-                // 2) 生成随机金额分配
+                // 2) 获取买一价（用于数量风险控制与下单）
+                const bid1Price = await mainAccount.getBid1Price(symbol);
+                logger.log(`📊 当前买一价: ${bid1Price}`);
+
+                // 3) 生成随机金额分配（基于配置参考价做风控）
                 const quantityDist = this.generateQuantityDistribution();
                 logger.log(`💰 金额分配:`);
                 logger.log(`   主账号 ${mainAccountName}: ${quantityDist.mainQuantity} ${symbol}`);
                 logger.log(`   辅账号 ${helperAccountNames[0]}: ${quantityDist.quantities[0]} ${symbol}`);
                 logger.log(`   辅账号 ${helperAccountNames[1]}: ${quantityDist.quantities[1]} ${symbol}`);
                 logger.log(`   验证: ${quantityDist.quantities[0] + quantityDist.quantities[1]} = ${quantityDist.mainQuantity}`);
-
-                // 3) 获取买一价
-                const bid1Price = await mainAccount.getBid1Price(symbol);
-                logger.log(`📊 当前买一价: ${bid1Price}`);
 
                 // 4) 主账号下限价单
                 const limitOrder = await mainAccount.buyOrder(symbol, quantityDist.mainQuantity, bid1Price, 'LIMIT', positionSide);
@@ -1044,18 +1046,27 @@ class ThreeAccountHedgeTool {
 
     // 显示当前配置和风险分析
     showConfigAnalysis() {
-        const currentPrice = 112000; // BTC价格
-        const minValue = (api.minQuantity || 0.001) * currentPrice;
-        const maxValue = (api.maxQuantity || 0.01) * currentPrice;
+        const referencePrice = api.price || 0; // 参考价（来自配置）
+        const minValue = (api.minQuantity || 0.001) * referencePrice;
+        const maxValue = (api.maxQuantity || 0.01) * referencePrice;
         const leverage = api.leverage || 20;
         
         logger.log(`\n📊 === 当前配置分析 ===`);
         logger.log(`币种: ${api.symbol}`);
         logger.log(`杠杆: ${leverage}x`);
-        logger.log(`BTC价格: ${currentPrice.toLocaleString()} USDT`);
+        if (referencePrice > 0) {
+            logger.log(`参考价: ${referencePrice.toLocaleString()} USDT`);
+        } else {
+            logger.log(`参考价: 未设置`);
+        }
         logger.log(`\n💰 下单金额分析:`);
-        logger.log(`最小下单: ${api.minQuantity || 0.001} BTC = ${minValue.toFixed(2)} USDT`);
-        logger.log(`最大下单: ${api.maxQuantity || 0.01} BTC = ${maxValue.toFixed(2)} USDT`);
+        if (referencePrice > 0) {
+            logger.log(`最小下单: ${api.minQuantity || 0.001} = ${minValue.toFixed(2)} USDT`);
+            logger.log(`最大下单: ${api.maxQuantity || 0.01} = ${maxValue.toFixed(2)} USDT`);
+        } else {
+            logger.log(`最小下单: ${api.minQuantity || 0.001}`);
+            logger.log(`最大下单: ${api.maxQuantity || 0.01}`);
+        }
         logger.log(`\n🛡️ 保证金需求:`);
         logger.log(`最小保证金: ${(minValue / leverage).toFixed(2)} USDT`);
         logger.log(`最大保证金: ${(maxValue / leverage).toFixed(2)} USDT`);

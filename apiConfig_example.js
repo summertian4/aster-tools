@@ -40,7 +40,6 @@ const config = {
    
    // 安全配置
    maxPositionValue: 10000,  // 最大持仓价值(USDT) - 防止过度杠杆
-   minAccountBalance: 100,  // 最小账户余额要求(USDT)
 }
 
 module.exports = config;
