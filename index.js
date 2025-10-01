@@ -609,7 +609,12 @@ class ThreeAccountHedgeTool {
                 // 5) 监控主账号订单成交
                 const monitorResult = await mainAccount.monitorOrderStatus(symbol, limitOrder.orderId, maxWaitTime);
                 if (!monitorResult.success) {
-                    logger.log(`⏭️ ${mainAccountName}订单未完全成交，跳过本周期`);
+                    logger.log(`⏭️ ${mainAccountName}订单未完全成交，启动清理后进入下一轮`);
+                    try {
+                        await this.ensureNoPositionsAndOrders(symbol);
+                    } catch (cleanupError) {
+                        logger.error(`⚠️ 清理挂单/仓位失败: ${cleanupError.message}`);
+                    }
                     continue;
                 }
 
@@ -662,27 +667,31 @@ class ThreeAccountHedgeTool {
                 } else {
                     this.isClosing = true;
                     logger.log(`\n🧹 同时平仓中...`);
-                    const closeResults = await Promise.allSettled([
-                        this.account1.closePosition(symbol),
-                        this.account2.closePosition(symbol),
-                        this.account3.closePosition(symbol)
-                    ]);
+                    try {
+                        const closeResults = await Promise.allSettled([
+                            this.account1.closePosition(symbol),
+                            this.account2.closePosition(symbol),
+                            this.account3.closePosition(symbol)
+                        ]);
 
-                    closeResults.forEach((result, index) => {
-                        if (result.status === 'fulfilled') {
-                            if (result.value) {
-                                logger.log(`✅ 账号${index + 1} 平仓成功`);
+                        closeResults.forEach((result, index) => {
+                            if (result.status === 'fulfilled') {
+                                if (result.value) {
+                                    logger.log(`✅ 账号${index + 1} 平仓成功`);
+                                } else {
+                                    logger.log(`ℹ️ 账号${index + 1} 无需平仓`);
+                                }
                             } else {
-                                logger.log(`ℹ️ 账号${index + 1} 无需平仓`);
+                                logger.error(`❌ 账号${index + 1} 平仓失败: ${result.reason?.message}`);
                             }
-                        } else {
-                            logger.error(`❌ 账号${index + 1} 平仓失败: ${result.reason?.message}`);
-                        }
-                    });
-                    this.isClosing = false;
-                }
+                        });
 
-                logger.log(`🎉 平仓完成，准备进入下一轮`);
+                        await this.ensureNoPositionsAndOrders(symbol);
+                        logger.log(`🎉 平仓完成，准备进入下一轮`);
+                    } finally {
+                        this.isClosing = false;
+                    }
+                }
             } catch (err) {
                 logger.error(`❌ 周期 #${cycle} 失败: ${err.message}`);
                 logger.log(`🕒 休眠 5 秒后继续下一轮...`);
@@ -730,24 +739,25 @@ class ThreeAccountHedgeTool {
 
     // 取消所有账号的未成交订单
     async cancelAllOpenOrders(symbol = api.symbol) {
+        const targetSymbol = symbol || api.symbol;
         logger.log(`\n🚫 === [${this.formatTime()}] 取消所有未成交订单 ===`);
-        logger.log(`币种: ${symbol}`);
+        logger.log(`币种: ${targetSymbol}`);
 
         try {
             // 先查询所有账号的未成交订单
             const openOrdersResults = await Promise.allSettled([
-                this.account1.getOpenOrders(symbol),
-                this.account2.getOpenOrders(symbol),
-                this.account3.getOpenOrders(symbol)
+                this.account1.getOpenOrders(targetSymbol),
+                this.account2.getOpenOrders(targetSymbol),
+                this.account3.getOpenOrders(targetSymbol)
             ]);
 
             let totalOrders = 0;
             openOrdersResults.forEach((result, index) => {
                 if (result.status === 'fulfilled' && result.value) {
-                    const orders = result.value;
+                    const orders = result.value.filter(order => !order.symbol || order.symbol === targetSymbol);
                     if (orders.length > 0) {
                         totalOrders += orders.length;
-                        logger.log(`账号${index + 1} 发现 ${orders.length} 个未成交订单`);
+                        logger.log(`账号${index + 1} 发现 ${orders.length} 个${targetSymbol}未成交订单`);
                         orders.forEach(order => {
                             logger.log(`   订单ID: ${order.orderId}, 类型: ${order.side} ${order.type}, 数量: ${order.origQty}, 价格: ${order.price || '市价'}`);
                         });
@@ -760,16 +770,16 @@ class ThreeAccountHedgeTool {
             });
 
             if (totalOrders === 0) {
-                logger.log(`✅ 所有账号均无 ${symbol} 未成交订单，无需取消`);
+                logger.log(`✅ 所有账号均无 ${targetSymbol} 未成交订单，无需取消`);
                 return [];
             }
 
             // 执行取消订单
-            logger.log(`\n🔄 开始取消 ${totalOrders} 个未成交订单...`);
+            logger.log(`\n🔄 开始取消 ${totalOrders} 个${targetSymbol}未成交订单...`);
             const cancelResults = await Promise.allSettled([
-                this.account1.cancelAllOrders(symbol),
-                this.account2.cancelAllOrders(symbol),
-                this.account3.cancelAllOrders(symbol)
+                this.account1.cancelAllOrders(targetSymbol),
+                this.account2.cancelAllOrders(targetSymbol),
+                this.account3.cancelAllOrders(targetSymbol)
             ]);
 
             cancelResults.forEach((result, index) => {
@@ -785,6 +795,83 @@ class ThreeAccountHedgeTool {
             logger.error(`取消订单操作失败: ${error.message}`);
             throw error;
         }
+    }
+
+    // 确保所有账号无持仓和挂单
+    async ensureNoPositionsAndOrders(symbol = api.symbol) {
+        const targetSymbol = symbol || api.symbol;
+        logger.log(`\n🧹 === [${this.formatTime()}] 确保 ${targetSymbol} 无持仓与挂单 ===`);
+        logger.log(`币种: ${targetSymbol}`);
+
+        // 先取消所有挂单
+        await this.cancelAllOpenOrders(targetSymbol);
+
+        const collectPositions = async () => {
+            const positionResults = await Promise.allSettled([
+                this.account1.getPositions(targetSymbol),
+                this.account2.getPositions(targetSymbol),
+                this.account3.getPositions(targetSymbol)
+            ]);
+
+            const leftovers = [];
+
+            positionResults.forEach((result, index) => {
+                if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+                    const activePositions = result.value.filter(pos => {
+                        if (pos.symbol && pos.symbol !== targetSymbol) {
+                            return false;
+                        }
+                        const amt = parseFloat(pos.positionAmt);
+                        return !Number.isNaN(amt) && Math.abs(amt) > 0;
+                    });
+
+                    if (activePositions.length > 0) {
+                        leftovers.push({ index, positions: activePositions });
+                        activePositions.forEach(pos => {
+                            const amt = parseFloat(pos.positionAmt);
+                            const side = pos.positionSide || (amt > 0 ? 'LONG' : 'SHORT');
+                            logger.log(`⚠️ 账号${index + 1} 残余持仓: ${pos.positionAmt} ${targetSymbol} (side: ${side}, 均价: ${pos.entryPrice})`);
+                        });
+                    } else {
+                        logger.log(`✅ 账号${index + 1} 无持仓`);
+                    }
+                } else {
+                    const reason = result.reason?.message || '未知错误';
+                    logger.error(`账号${index + 1} 查询持仓失败: ${reason}`);
+                    throw new Error(`账号${index + 1} 查询持仓失败: ${reason}`);
+                }
+            });
+
+            return leftovers;
+        };
+
+        let leftovers = await collectPositions();
+        if (leftovers.length === 0) {
+            logger.log(`✅ 已确认所有账号无 ${targetSymbol} 持仓与挂单`);
+            return;
+        }
+
+        logger.log(`🔄 检测到残余持仓，执行补充平仓...`);
+        const retryResults = await Promise.allSettled(leftovers.map(item => this.accounts[item.index].closePosition(targetSymbol)));
+
+        retryResults.forEach((result, idx) => {
+            const accountIndex = leftovers[idx].index;
+            if (result.status === 'fulfilled') {
+                logger.log(`✅ 账号${accountIndex + 1} 补充平仓指令已提交`);
+            } else {
+                const reason = result.reason?.message || '未知错误';
+                logger.error(`❌ 账号${accountIndex + 1} 补充平仓失败: ${reason}`);
+            }
+        });
+
+        leftovers = await collectPositions();
+        if (leftovers.length === 0) {
+            logger.log(`✅ 二次检查通过，所有账号已无 ${targetSymbol} 持仓`);
+            return;
+        }
+
+        const stillHolding = leftovers.map(item => `账号${item.index + 1}`).join(', ');
+        throw new Error(`仍检测到持仓未能清理: ${stillHolding}`);
     }
 
     // 查询三账号的合约账户余额
