@@ -83,6 +83,9 @@ class AsterFuturesAPI {
         this.proxyUrl = null;
         this.proxyAgent = null;
         this.proxyConfig = proxyConfig;
+        // 服务器时间偏移（serverTime - localTime）
+        this.timeOffsetMs = 0;
+        this.lastTimeSyncAt = 0;
         this.initProxy();
     }
 
@@ -129,6 +132,23 @@ class AsterFuturesAPI {
         };
     }
 
+    async syncTime() {
+        try {
+            const url = `${this.baseURL}/fapi/v1/time`;
+            const opts = { method: 'GET' };
+            if (this.proxyAgent) opts.agent = this.proxyAgent;
+            const res = await nodeFetch(url, opts);
+            const data = await res.json();
+            if (data && typeof data.serverTime === 'number') {
+                this.timeOffsetMs = data.serverTime - Date.now();
+                this.lastTimeSyncAt = Date.now();
+                logger.log(`[${this.accountName}] 时间同步: 偏移 ${this.timeOffsetMs} ms`);
+            }
+        } catch (e) {
+            logger.error(`[${this.accountName}] 时间同步失败: ${e.message}`);
+        }
+    }
+
     generateSignature(queryString) {
         return crypto.createHmac('sha256', this.apiSecret).update(queryString).digest('hex');
     }
@@ -136,102 +156,115 @@ class AsterFuturesAPI {
     async makeRequest(method, endpoint, params = {}, needAuth = false) {
         const maxRetries = Number.isFinite(api.requestRetries) ? Math.max(0, api.requestRetries) : 3;
         const baseDelayMs = Number.isFinite(api.requestRetryDelayMs) ? Math.max(50, api.requestRetryDelayMs) : 800;
+        const recvWindowDefault = Number.isFinite(api.recvWindow) ? Math.max(1000, api.recvWindow) : 10000;
         let attempt = 0;
         let lastError = null;
+        const origParams = Object.assign({}, params);
         const shouldRetry = (err, status) => {
             const msg = String(err?.message || '').toLowerCase();
-            // 网络类错误
             const net = ['etimedout', 'econnreset', 'eai_again', 'fetch failed', 'network', 'socket hang up'].some(k => msg.includes(k));
-            // HTTP 类可重试
             const httpRetry = status && (status === 429 || (status >= 500 && status < 600));
-            return net || httpRetry;
+            const tsSkew = msg.includes('-1021') || msg.includes('recvwindow');
+            return net || httpRetry || tsSkew;
         };
 
         while (attempt <= maxRetries) {
             try {
-            let url = `${this.baseURL}${endpoint}`;
-            let queryString = '';
-            let body = null;
-            
-            const headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'User-Agent': 'AsterAPI/1.0'
-            };
+                // 每次尝试都重建参数，刷新时间戳
+                const reqParams = Object.assign({}, origParams);
+                let url = `${this.baseURL}${endpoint}`;
+                let queryString = '';
+                let body = null;
 
-            if (needAuth) {
-                // 统一加入 timestamp/recvWindow（v4 不需要 nonce/user）
-                if (params.timestamp == null) params.timestamp = Date.now();
-                params.recvWindow = params.recvWindow || 5000;
-                headers['X-MBX-APIKEY'] = this.apiKey;
-            }
+                const headers = {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': 'AsterAPI/1.0'
+                };
 
-            if (Object.keys(params).length > 0) {
-                queryString = new URLSearchParams(params).toString();
                 if (needAuth) {
-                    const signature = this.generateSignature(queryString);
-                    queryString += `&signature=${signature}`;
+                    // 根据服务器时间偏移计算 timestamp
+                    const now = Date.now() + (this.timeOffsetMs || 0);
+                    reqParams.timestamp = now;
+                    reqParams.recvWindow = reqParams.recvWindow || recvWindowDefault;
+                    headers['X-MBX-APIKEY'] = this.apiKey;
                 }
-            }
 
-            if (method === 'GET') {
-                if (queryString) {
-                    url += `?${queryString}`;
-                }
-            } else if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
-                if (queryString) {
-                    body = queryString;
-                }
-            }
-
-            const fetchOptions = {
-                method,
-                headers,
-                body
-            };
-
-            // 使用代理
-            if (this.proxyAgent) {
-                fetchOptions.agent = this.proxyAgent;
-            }
-
-            const response = await nodeFetch(url, fetchOptions);
-
-            if (!response.ok) {
-                let errorMessage = `HTTP error! status: ${response.status}`;
-                try {
-                    const errorBody = await response.text();
-                    if (errorBody) {
-                        errorMessage += `, response: ${errorBody}`;
+                if (Object.keys(reqParams).length > 0) {
+                    queryString = new URLSearchParams(reqParams).toString();
+                    if (needAuth) {
+                        const signature = this.generateSignature(queryString);
+                        queryString += `&signature=${signature}`;
                     }
-                } catch (e) {
-                    // 忽略读取响应体的错误
                 }
-                const httpErr = new Error(errorMessage);
-                httpErr.status = response.status;
-                throw httpErr;
-            }
 
-            const result = await response.json();
-            return result;
+                if (method === 'GET') {
+                    if (queryString) {
+                        url += `?${queryString}`;
+                    }
+                } else if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
+                    if (queryString) {
+                        body = queryString;
+                    }
+                }
+
+                const fetchOptions = {
+                    method,
+                    headers,
+                    body
+                };
+
+                if (this.proxyAgent) {
+                    fetchOptions.agent = this.proxyAgent;
+                }
+
+                // 首次尝试前，如长时间未同步则同步时间
+                if (needAuth && (!this.lastTimeSyncAt || (Date.now() - this.lastTimeSyncAt) > 60_000)) {
+                    await this.syncTime();
+                }
+
+                const response = await nodeFetch(url, fetchOptions);
+
+                if (!response.ok) {
+                    let errorMessage = `HTTP error! status: ${response.status}`;
+                    try {
+                        const errorBody = await response.text();
+                        if (errorBody) {
+                            errorMessage += `, response: ${errorBody}`;
+                        }
+                    } catch (e) {}
+                    const httpErr = new Error(errorMessage);
+                    httpErr.status = response.status;
+                    throw httpErr;
+                }
+
+                const result = await response.json();
+                return result;
             } catch (error) {
                 lastError = error;
                 const status = error?.status;
+                const msg = String(error?.message || '').toLowerCase();
                 attempt += 1;
+
+                // 碰到时间戳误差时，先同步时间再重试
+                if (msg.includes('-1021') || msg.includes('recvwindow')) {
+                    await this.syncTime();
+                }
+
                 if (attempt > maxRetries || !shouldRetry(error, status)) {
                     logger.error(`[${this.accountName}] 请求失败: ${error.message}`);
-                    const briefParams = Object.keys(params || {}).length ? `?${new URLSearchParams(Object.assign({}, params, { signature: undefined })).toString()}` : '';
-                    const msg = `⚠️ 报警：账号 ${this.accountName} API 请求失败\n${method} ${endpoint}${briefParams}\n错误: ${error.message}`;
-                    await sendTelegramAlert(msg);
+                    const bpObj = Object.assign({}, origParams);
+                    delete bpObj.signature;
+                    const briefParams = Object.keys(bpObj).length ? `?${new URLSearchParams(bpObj).toString()}` : '';
+                    const alertMsg = `⚠️ 报警：账号 ${this.accountName} API 请求失败\n${method} ${endpoint}${briefParams}\n错误: ${error.message}`;
+                    await sendTelegramAlert(alertMsg);
                     throw error;
                 }
-                // 退避重试
                 const jitter = Math.floor(Math.random() * 200);
-                const delay = Math.min(10_000, baseDelayMs * Math.pow(2, attempt - 1)) + jitter;
+                const delay = Math.min(15_000, baseDelayMs * Math.pow(2, attempt - 1)) + jitter;
                 logger.log(`[${this.accountName}] 请求重试(${attempt}/${maxRetries}) ${method} ${endpoint}: ${error.message}，${delay}ms 后重试`);
                 await new Promise(r => setTimeout(r, delay));
             }
         }
-        // 理论上不会到达
         throw lastError || new Error('未知请求错误');
     }
 

@@ -40,6 +40,11 @@ const config = {
    
    // 安全配置
    maxPositionValue: 10000,  // 最大持仓价值(USDT) - 防止过度杠杆
+   
+   // 可选：请求重试与时间窗
+   // requestRetries: 3,          // 网络/429/5xx/时间戳误差 自动重试次数
+   // requestRetryDelayMs: 800,    // 首次退避延迟（毫秒），指数退避
+   // recvWindow: 10000,           // 毫秒，时间戳有效窗口，建议 >= 10000
 }
 
 module.exports = config;
